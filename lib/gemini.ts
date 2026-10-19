@@ -7,13 +7,33 @@ const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
  */
 const FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash"];
 
+/** A bare model id, e.g. `gemini-3.6-flash`. */
+const MODEL_ID = /^[a-z0-9][a-z0-9.\-]*$/i;
+
+/**
+ * The model name goes straight into the request path, so a stray quote or a
+ * `models/` prefix in the environment variable produces
+ * "unexpected model name format" from Google. Clean up the common paste
+ * mistakes, and ignore the value outright if it still does not look like a
+ * model id — a misconfigured variable should not take the feature down when
+ * there are working defaults to fall back to.
+ */
+function normalizeModel(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const cleaned = raw
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/^models\//, "")
+    .trim();
+  return MODEL_ID.test(cleaned) ? cleaned : null;
+}
+
 /** Server-only. The key has no NEXT_PUBLIC_ prefix, so it stays on the server. */
 function modelChain() {
-  const preferred = process.env.GEMINI_MODEL?.trim();
-  const chain = preferred
+  const preferred = normalizeModel(process.env.GEMINI_MODEL);
+  return preferred
     ? [preferred, ...FALLBACK_MODELS.filter((m) => m !== preferred)]
     : FALLBACK_MODELS;
-  return chain;
 }
 
 /**
@@ -87,9 +107,14 @@ export async function generateCaption(
 
     if (!ok) {
       lastError = payload.error?.message ?? `Gemini returned ${status}.`;
-      // 429/503 mean "busy or rate limited" -- worth trying the next model.
-      // Anything else (bad key, bad request) will fail the same way for all.
-      if (status === 429 || status === 503) continue;
+
+      // 429/503 mean "busy or rate limited", and 404/400-about-the-model mean
+      // this particular model is unusable -- both are worth trying the next
+      // one. Anything else (bad key, bad prompt) fails the same way for all.
+      const modelIsTheProblem =
+        status === 404 || /model/i.test(lastError);
+      if (status === 429 || status === 503 || modelIsTheProblem) continue;
+
       throw new Error(lastError.slice(0, 300));
     }
 
